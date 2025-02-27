@@ -9,22 +9,34 @@ docker build -t lento .
 ## Start Server
 
 ```sh
-docker run -d --name lento-server -p 8000:8000 lento
+cp lento.example.yaml lento.yaml
+
+# then edit lento.yaml
 ```
 
-## Convert to markdown
+```sh
+docker run -d --name lento-server -v $PWD/lento.yaml:/app/lento.yaml -p 8000:8000 lento
+```
+
+## Convert to Markdown
 
 ```sh
 curl http://127.0.0.1:8000/to_markdown -F "file=@sample.docx"
 ```
 
-## LLM chat API
+## OpenAI Compatible API
 
 ```sh
+curl -v http://127.0.0.1:8000/v1/models
+```
+
+```sh
+export TOKEN=****
+
 curl -v http://127.0.0.1:8000/v1/chat/completions \
+  -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "auto",
     "messages": [
       {
         "role": "user",

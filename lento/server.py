@@ -1,7 +1,9 @@
 import logging
-import os
-from fastapi import FastAPI, UploadFile, HTTPException
+import yaml
+from datetime import datetime
+from fastapi import FastAPI, Depends, UploadFile, HTTPException
 from fastapi.responses import StreamingResponse
+from fastapi.security import OAuth2PasswordBearer
 from http import HTTPStatus
 from tempfile import TemporaryDirectory
 from markitdown import MarkItDown
@@ -11,16 +13,15 @@ from openai.types.chat import (
     ChatCompletionToolParam,
     ChatCompletionToolChoiceOptionParam,
 )
+from openai.types.model import Model
 from pydantic import BaseModel
-from typing import Optional, List
+from typing import Annotated, Dict, Optional, List
 
 
-QWEN_BASE_URL = os.getenv("QWEN_BASE_URL", "http://127.0.0.1:8001/v1")
-QWEN_TOKEN = os.getenv("QWEN_TOKEN", "****")
-QWEN_MODEL = os.getenv("QWEN_MODEL", "qwen2.5:32b")
-DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "http://127.0.0.1:8002/v1")
-DEEPSEEK_TOKEN = os.getenv("DEEPSEEK_TOKEN", "****")
-DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-r1:32b")
+with open("./lento.yaml", 'r') as file:
+    config = yaml.safe_load(file)
+    MODELS: Dict[str, str] = config.get("models", [])
+    DEFAULT_MODEL = config.get("default_model", "")
 
 
 logger = logging.getLogger("uvicorn")
@@ -49,49 +50,66 @@ async def to_markdown(file: UploadFile):
             raise HTTPException(HTTPStatus.INTERNAL_SERVER_ERROR, str(e))
 
 
+@app.get("/v1/models")
+async def models():
+    return {
+        "object": "list",
+        "data": [
+            Model(
+                id=model,
+                created=int(datetime.now().timestamp()),
+                object="model",
+                owned_by="system",
+            )
+            for model in MODELS
+        ]
+    }
+
+
 class ChatCompletionRequest(BaseModel):
-    model: Optional[str] = "auto"
+    model: Optional[str] = None
     messages: List[ChatCompletionMessageParam]
     stream: Optional[bool] = None
     temperature: Optional[float] = None
     top_p: Optional[float] = None
     max_tokens: Optional[int] = None
+    max_completion_tokens: Optional[int] = None
     presence_penalty: Optional[float] = None
     frequency_penalty: Optional[float] = None
     tools: List[ChatCompletionToolParam] = None
     tool_choice: Optional[ChatCompletionToolChoiceOptionParam] = None
 
 
-@app.post("/v1/chat/completions")
-async def chat_completions(req: ChatCompletionRequest):
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+
+@app.post("/v1/chat/completions", )
+async def chat_completions(
+    req: ChatCompletionRequest,
+    token: Annotated[str, Depends(oauth2_scheme)],
+):
+    logger.info("new request")
+
+    if not req.model:
+        req.model = DEFAULT_MODEL
+
+    base_url = MODELS.get(req.model)
+    if not base_url:
+        raise HTTPException(HTTPStatus.NOT_FOUND, "model not found")
+
     logger.info(f"model: {req.model}, stream: {req.stream}")
     logger.info(f"messages: {req.messages}")
 
-    model = req.model
-    if not model or model == "auto":
-        if req.tool_choice:
-            model = QWEN_MODEL
-        else:
-            model = DEEPSEEK_MODEL
-
-    if model == QWEN_MODEL:
-        base_url = QWEN_BASE_URL
-        api_key = QWEN_TOKEN
-    elif model == DEEPSEEK_MODEL:
-        base_url = DEEPSEEK_BASE_URL
-        api_key = DEEPSEEK_TOKEN
-    else:
-        raise HTTPException(HTTPStatus.NOT_FOUND, f"model [{model}] not found")
-
-    client = OpenAI(base_url=base_url, api_key=api_key, max_retries=0)
+    client = OpenAI(base_url=base_url, api_key=token, max_retries=0)
 
     params = dict(
-        model=model,
+        model=req.model,
         messages=req.messages,
         stream=req.stream,
         temperature=req.temperature,
         top_p=req.top_p,
         max_tokens=req.max_tokens,
+        max_completion_tokens=req.max_completion_tokens,
         presence_penalty=req.presence_penalty,
         frequency_penalty=req.frequency_penalty,
     )

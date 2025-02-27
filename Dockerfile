@@ -10,4 +10,4 @@ RUN pdm install
 
 COPY lento /app/
 
-CMD [ ".venv/bin/uvicorn", "server:app", "--host", "0.0.0.0" ]
+ENTRYPOINT [ ".venv/bin/uvicorn", "server:app", "--host", "0.0.0.0"]
