@@ -3,7 +3,8 @@ import logging
 import os
 import shutil
 from contextlib import asynccontextmanager
-from fastapi import FastAPI, UploadFile, HTTPException
+from typing import Optional
+from fastapi import FastAPI, APIRouter, UploadFile, HTTPException
 from http import HTTPStatus
 from tempfile import TemporaryDirectory
 from fastapi.responses import StreamingResponse
@@ -25,10 +26,12 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(lifespan=lifespan)
+router = APIRouter(prefix="/api")
 
 
-# convert a file to markdown
-@app.post("/to_markdown")
+@router.post(
+    "/to_markdown",
+    summary="Convert a file to markdown")
 async def to_markdown(file: UploadFile):
     logger.info(f"convert markdown: {file.filename}")
 
@@ -48,48 +51,54 @@ async def to_markdown(file: UploadFile):
             raise HTTPException(HTTPStatus.INTERNAL_SERVER_ERROR, str(e))
 
 
-# create a new knowledge-base
-@app.post("/kb/")
-async def create_kb(
-    name: str,
-    description: str,
+@router.post(
+    "/kgb/",
+    summary="Create a new knowledge base")
+async def create_kgb(
     session: SessionDep,
+    name: str,
+    description: Optional[str] = None,
 ):
     logger.info(f"create knowledge base: {name}")
 
-    kb = KnowledgeBase(
+    kgb = KnowledgeBase(
         name=name,
         description=description,
     )
-    session.add(kb)
+    session.add(kgb)
     session.commit()
-    session.refresh(kb)
-    return {"kb_id": kb.id}
+    session.refresh(kgb)
+    return {"kgb_id": kgb.id}
 
 
-# get the knowledge-base list
-@app.get("/kb/")
-async def get_kb_list(
+@router.get(
+    "/kgb/",
+    summary="Get the knowledge base list",
+)
+async def get_kgb_list(
     session: SessionDep,
 ):
-    kb_list = session.exec(select(KnowledgeBase)).all()
-    return {"kb_list": kb_list}
+    kgb_list = session.exec(select(KnowledgeBase)).all()
+    return {"kgb_list": kgb_list}
 
 
-# upload a file to a knowledge-base
-@app.post("/kb/{kb_id}/doc/")
+@router.post(
+    "/kgb/{kgb_id}/doc/",
+    summary="Upload a file to a knowledge base",
+)
 async def upload_file(
-    kb_id: int,
-    file: UploadFile,
     session: SessionDep,
+    kgb_id: int,
+    file: UploadFile,
 ):
-    logger.info(f"upload file {file.filename} to knowledge base {kb_id}")
+    logger.info(f"upload file {file.filename} to knowledge base {kgb_id}")
+
     content = await file.read()
     doc_file = DocFile(
         filename=file.filename,
         suffix=file.filename.split(".")[-1],
         content=content,
-        kb_id=kb_id,
+        kgb_id=kgb_id,
     )
     session.add(doc_file)
     session.commit()
@@ -97,11 +106,13 @@ async def upload_file(
     return {"doc_id": doc_file.id}
 
 
-# get the document list of a knowledge-base
-@app.get("/kb/{kb_id}/doc/")
+@router.get(
+    "/kgb/{kgb_id}/doc/",
+    summary="Get the document list of a knowledge base",
+)
 async def get_doc_list(
-    kb_id: int,
     session: SessionDep,
+    kgb_id: int,
 ):
     doc_list = session.exec(
         select(DocFile).options(
@@ -111,114 +122,208 @@ async def get_doc_list(
                 DocFile.suffix,
                 DocFile.created_at,
             ),
-        ).where(DocFile.kb_id == kb_id)).all()
+        ).where(DocFile.kgb_id == kgb_id)).all()
     return {"doc_list": doc_list}
 
 
-# download a document
-@app.get("/kb/{kb_id}/doc/{doc_id}/download")
-async def download_doc(
-    kb_id: int,
-    doc_id: int,
+@router.delete(
+    "kgb/{kgb_id}",
+    summary="Delete a knowledge base",
+)
+async def delete_kgb(
     session: SessionDep,
+    kgb_id: int,
+):
+    kgb = session.get(KnowledgeBase, kgb_id)
+    if not kgb:
+        raise HTTPException(HTTPStatus.NOT_FOUND, "Knowledge base not found")
+
+    doc_list = session.exec(
+        select(DocFile).where(DocFile.kgb_id == kgb_id)).all()
+
+    md_list = session.exec(
+        select(MarkdownFile).where(MarkdownFile.doc_id.in_(
+            [doc.id for doc in doc_list]))).all()
+
+    for md in md_list:
+        session.delete(md)
+
+    for doc in doc_list:
+        session.delete(doc)
+
+    session.delete(kgb)
+
+    session.commit()
+    return {}
+
+
+@router.get(
+    "/doc/{doc_id}/info",
+    summary="Get a document info",
+)
+async def get_doc_info(
+    session: SessionDep,
+    doc_id: int,
+):
+    doc_file = session.exec(
+        select(DocFile).options(
+            load_only(
+                DocFile.id,
+                DocFile.filename,
+                DocFile.suffix,
+                DocFile.created_at,
+            ),
+        ).where(DocFile.id == doc_id)).first()
+    if not doc_file:
+        raise HTTPException(HTTPStatus.NOT_FOUND, "Document not found")
+    return {"doc_info": doc_file}
+
+
+@router.get(
+    "/doc/{doc_id}/download",
+    summary="Download a document",
+)
+async def download_doc(
+    session: SessionDep,
+    doc_id: int,
 ):
     doc_file = session.get(DocFile, doc_id)
     if not doc_file:
         raise HTTPException(HTTPStatus.NOT_FOUND, "Document not found")
-    if doc_file.kb_id != kb_id:
-        raise HTTPException(HTTPStatus.FORBIDDEN,
-                            "Document does not belong to the knowledge base")
 
+    filename = doc_file.filename.encode("utf-8").decode("unicode_escape")
     return StreamingResponse(
         io.BytesIO(doc_file.content),
         media_type="application/octet-stream",
         headers={
-            "Content-Disposition": f"attachment; filename={doc_file.filename}",
+            "Content-Disposition": f"attachment; filename={filename}",
         },
     )
 
 
-# convert a doc to markdown
-@app.post("/kb/{kb_id}/doc/{doc_id}/to_markdown")
+@router.post(
+    "/doc/{doc_id}/to_markdown",
+    summary="Convert a doc to markdown",
+)
 async def doc_to_markdown(
-    kb_id: int,
-    doc_id: int,
     session: SessionDep,
+    doc_id: int,
 ):
     logger.info(f"convert markdown for doc: {doc_id}")
 
     # get the document content
-    doc = session.get(DocFile, doc_id)
-    if not doc:
+    doc_file = session.get(DocFile, doc_id)
+    if not doc_file:
         raise HTTPException(HTTPStatus.NOT_FOUND, "Document not found")
-    if doc.kb_id != kb_id:
-        raise HTTPException(HTTPStatus.FORBIDDEN,
-                            "Document does not belong to the knowledge base")
 
     # convert the document content to markdown
     with TemporaryDirectory() as tmpdir:
-        filepath = f"{tmpdir}/{doc.filename}"
+        filepath = f"{tmpdir}/{doc_file.filename}"
         with open(filepath, "wb") as f:
-            f.write(doc.content)
+            f.write(doc_file.content)
 
         try:
             md = MarkItDown()
             md_content = md.convert(filepath).text_content
         except BaseException as e:
-            logger.error(f"Error converting file {doc.filename}: {e}")
+            logger.error(f"Error converting to markdown: {e}")
             raise HTTPException(HTTPStatus.INTERNAL_SERVER_ERROR, str(e))
 
     md_file = MarkdownFile(doc_id=doc_id, content=md_content)
     session.add(md_file)
     session.commit()
     session.refresh(md_file)
-    return {"id": md_file.id}
+    return {"md_id": md_file.id}
 
 
-# get the markdown file list of a document
-@app.get("/kb/{kb_id}/doc/{doc_id}/markdown")
-async def get_markdown_files(
-    kb_id: int,
-    doc_id: int,
+@router.delete(
+    "/doc/{doc_id}",
+    summary="Delete a document",
+)
+async def delete_doc(
     session: SessionDep,
+    doc_id: int,
 ):
+    md_list = session.exec(
+        select(MarkdownFile).where(MarkdownFile.doc_id == doc_id)
+    ).all()
+    for md in md_list:
+        session.delete(md)
+
     doc_file = session.get(DocFile, doc_id)
     if not doc_file:
         raise HTTPException(HTTPStatus.NOT_FOUND, "Document not found")
-    if doc_file.kb_id != kb_id:
-        raise HTTPException(HTTPStatus.FORBIDDEN,
-                            "Document does not belong to the knowledge base")
+    session.delete(doc_file)
 
-    md_files = session.exec(
-        select(MarkdownFile).where(MarkdownFile.doc_id == doc_id)).all()
-
-    return {"md_list": md_files}
+    session.commit()
+    return {}
 
 
-# generate summary for a markdown file
-@app.post("/kb/{kb_id}/markdown/{md_id}/summary")
-async def generate_summary(
-    kb_id: int,
-    md_id: int,
+@router.get(
+    "/kgb/{kgb_id}/markdown/",
+    summary="Get the markdown file list of a knowledge base",
+)
+async def get_markdown_files(
     session: SessionDep,
+    kgb_id: int,
+):
+    doc_list = session.exec(
+        select(DocFile).options(
+            load_only(
+                DocFile.id,
+                DocFile.filename,
+                DocFile.suffix,
+                DocFile.created_at,
+            ),
+        ).where(DocFile.kgb_id == kgb_id)).all()
+    md_list = session.exec(
+        select(MarkdownFile).options(
+            load_only(
+                MarkdownFile.id,
+                MarkdownFile.doc_id,
+                MarkdownFile.summary,
+                MarkdownFile.created_at,
+            ),
+        )
+        .where(MarkdownFile.doc_id.in_([doc.id for doc in doc_list]))).all()
+
+    return {"md_list": md_list}
+
+
+@router.get(
+    "/markdown/{md_id}",
+    summary="Get a markdown file",
+)
+async def get_markdown_file(
+    session: SessionDep,
+    md_id: int,
 ):
     md_file = session.get(MarkdownFile, md_id)
     if not md_file:
         raise HTTPException(HTTPStatus.NOT_FOUND, "Markdown file not found")
+    return {"md_file": md_file}
 
-    doc_file = session.get(DocFile, md_file.doc_id)
-    if not doc_file:
-        raise HTTPException(HTTPStatus.NOT_FOUND, "Document not found")
-    if doc_file.kb_id != kb_id:
-        raise HTTPException(HTTPStatus.FORBIDDEN,
-                            "Document does not belong to the knowledge base")
+
+@router.post(
+    "/markdown/{md_id}/summary",
+    summary="Generate summary for a markdown file",
+)
+async def generate_summary(
+    session: SessionDep,
+    md_id: int,
+):
+    logger.info(f"Generating summary for markdown file {md_id}")
+
+    md_file = session.get(MarkdownFile, md_id)
+    if not md_file:
+        raise HTTPException(HTTPStatus.NOT_FOUND, "Markdown file not found")
 
     md_file.summary = generate_markdown_summary(md_file.content)
     session.add(md_file)
     session.commit()
     session.refresh(md_file)
 
-    return {"markdown": md_file}
+    return {}
 
 
 def generate_markdown_summary(content: str) -> str:
@@ -226,14 +331,32 @@ def generate_markdown_summary(content: str) -> str:
     return content[:100] + "..." if len(content) > 100 else content
 
 
-# export the knowledge base data
-@app.get("/kb/{kb_id}/export")
-async def export_knowledge_base(
-    kb_id: int,
+@router.delete(
+    "/markdown/{md_id}",
+    summary="Delete a markdown file",
+)
+async def delete_markdown(
     session: SessionDep,
+    md_id: int,
 ):
-    kb = session.get(KnowledgeBase, kb_id)
-    if not kb:
+    md_file = session.get(MarkdownFile, md_id)
+    if not md_file:
+        raise HTTPException(HTTPStatus.NOT_FOUND, "Markdown file not found")
+    session.delete(md_file)
+    session.commit()
+    return {}
+
+
+@router.get(
+    "/kgb/{kgb_id}/export",
+    summary="Export the knowledge base data",
+)
+async def export_knowledge_base(
+    session: SessionDep,
+    kgb_id: int,
+):
+    kgb = session.get(KnowledgeBase, kgb_id)
+    if not kgb:
         raise HTTPException(HTTPStatus.NOT_FOUND, "Knowledge base not found")
 
     doc_list = session.exec(
@@ -244,8 +367,8 @@ async def export_knowledge_base(
                 DocFile.suffix,
                 DocFile.created_at,
             ),
-        ).where(DocFile.kb_id == kb_id)).all()
-    md_files = session.exec(
+        ).where(DocFile.kgb_id == kgb_id)).all()
+    md_list = session.exec(
         select(MarkdownFile).where(
             MarkdownFile.doc_id.in_([doc.id for doc in doc_list]))).all()
 
@@ -255,23 +378,27 @@ async def export_knowledge_base(
         os.makedirs(md_dir)
 
         with open(os.path.join(data_dir, "summary.txt"), "w") as f_summary:
-            for md_file in md_files:
+            for md_file in md_list:
                 with open(os.path.join(md_dir, f"{md_file.id}.md"), "w") as f:
                     f.write(md_file.content)
 
-            summary = md_file.summary.replace("\n", " ")
-            f_summary.write(f"{md_file.id}:{summary}\n\n")
+                summary = md_file.summary.replace("\n", " ")
+                f_summary.write(f"{md_file.id}:{summary}\n\n")
 
-        zip_file = os.path.join(tmpdir, f"{kb.id}.zip")
+        zip_file = os.path.join(tmpdir, f"{kgb.id}.zip")
         shutil.make_archive(zip_file, "zip", data_dir)
 
         with open(zip_file + ".zip", "rb") as f:
             zip_content = f.read()
 
+    filename = f"{kgb.name}.zip".encode("utf-8").decode("unicode_escape")
     return StreamingResponse(
         io.BytesIO(zip_content),
         media_type="application/zip",
         headers={
-            "Content-Disposition": f"attachment; filename={kb.id}.zip",
+            "Content-Disposition": f"attachment; filename={filename}",
         },
     )
+
+
+app.include_router(router)

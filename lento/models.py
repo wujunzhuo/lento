@@ -1,8 +1,8 @@
 from datetime import datetime
 from typing import Annotated
 from fastapi import Depends
-from sqlalchemy import func, DateTime
-from sqlmodel import Field, Column, Session, SQLModel, create_engine
+from sqlalchemy import func
+from sqlmodel import Field, Session, SQLModel, create_engine
 
 
 class KnowledgeBase(SQLModel, table=True):
@@ -14,7 +14,7 @@ class KnowledgeBase(SQLModel, table=True):
 
 class DocFile(SQLModel, table=True):
     id: int = Field(default=None, primary_key=True)
-    kb_id: int = Field(foreign_key="knowledgebase.id")
+    kgb_id: int = Field(foreign_key="knowledgebase.id")
     filename: str = Field(index=True)
     suffix: str = Field(index=True)
     content: bytes = Field()
@@ -27,8 +27,6 @@ class MarkdownFile(SQLModel, table=True):
     content: str = Field()
     summary: str = Field(default="")
     created_at: datetime = Field(default_factory=func.now)
-    updated_at: datetime = Field(
-        sa_column=Column(DateTime(), onupdate=func.now()))
 
 
 sqlite_file_name = "database.db"
