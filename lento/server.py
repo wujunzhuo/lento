@@ -3,7 +3,7 @@ import logging
 import os
 import shutil
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import List, Optional
 from fastapi import FastAPI, APIRouter, UploadFile, HTTPException
 from http import HTTPStatus
 from tempfile import TemporaryDirectory
@@ -78,15 +78,16 @@ async def create_kgb(
 async def get_kgb_list(
     session: SessionDep,
 ):
-    kgb_list = session.exec(select(KnowledgeBase)).all()
+    kgb_list = session.exec(
+        select(KnowledgeBase).order_by(KnowledgeBase.id)).all()
     return {"kgb_list": kgb_list}
 
 
 @router.post(
     "/kgb/{kgb_id}/doc/",
-    summary="Upload a file to a knowledge base",
+    summary="Upload a document to a knowledge base",
 )
-async def upload_file(
+async def upload_doc(
     session: SessionDep,
     kgb_id: int,
     file: UploadFile,
@@ -122,12 +123,12 @@ async def get_doc_list(
                 DocFile.suffix,
                 DocFile.created_at,
             ),
-        ).where(DocFile.kgb_id == kgb_id)).all()
+        ).order_by(DocFile.id).where(DocFile.kgb_id == kgb_id)).all()
     return {"doc_list": doc_list}
 
 
 @router.delete(
-    "kgb/{kgb_id}",
+    "/kgb/{kgb_id}",
     summary="Delete a knowledge base",
 )
 async def delete_kgb(
@@ -137,22 +138,7 @@ async def delete_kgb(
     kgb = session.get(KnowledgeBase, kgb_id)
     if not kgb:
         raise HTTPException(HTTPStatus.NOT_FOUND, "Knowledge base not found")
-
-    doc_list = session.exec(
-        select(DocFile).where(DocFile.kgb_id == kgb_id)).all()
-
-    md_list = session.exec(
-        select(MarkdownFile).where(MarkdownFile.doc_id.in_(
-            [doc.id for doc in doc_list]))).all()
-
-    for md in md_list:
-        session.delete(md)
-
-    for doc in doc_list:
-        session.delete(doc)
-
     session.delete(kgb)
-
     session.commit()
     return {}
 
@@ -208,6 +194,7 @@ async def download_doc(
 async def doc_to_markdown(
     session: SessionDep,
     doc_id: int,
+    max_lines: Optional[int] = None,
 ):
     logger.info(f"convert markdown for doc: {doc_id}")
 
@@ -229,11 +216,34 @@ async def doc_to_markdown(
             logger.error(f"Error converting to markdown: {e}")
             raise HTTPException(HTTPStatus.INTERNAL_SERVER_ERROR, str(e))
 
-    md_file = MarkdownFile(doc_id=doc_id, content=md_content)
-    session.add(md_file)
+    for block in split_by_lines(md_content, max_lines):
+        md_file = MarkdownFile(
+            doc_id=doc_id,
+            content=block,
+        )
+        session.add(md_file)
     session.commit()
-    session.refresh(md_file)
-    return {"md_id": md_file.id}
+    return {}
+
+
+def split_by_lines(input: str, max_lines: int | None) -> List[str]:
+    if not max_lines:
+        return [input]
+
+    lines = input.split('\n')
+    result = []
+    current_block = []
+
+    for line in lines:
+        current_block.append(line)
+        if len(current_block) >= max_lines:
+            result.append('\n'.join(current_block))
+            current_block = []
+
+    if current_block:
+        result.append('\n'.join(current_block))
+
+    return result
 
 
 @router.delete(
@@ -244,38 +254,22 @@ async def delete_doc(
     session: SessionDep,
     doc_id: int,
 ):
-    md_list = session.exec(
-        select(MarkdownFile).where(MarkdownFile.doc_id == doc_id)
-    ).all()
-    for md in md_list:
-        session.delete(md)
-
     doc_file = session.get(DocFile, doc_id)
     if not doc_file:
         raise HTTPException(HTTPStatus.NOT_FOUND, "Document not found")
     session.delete(doc_file)
-
     session.commit()
     return {}
 
 
 @router.get(
-    "/kgb/{kgb_id}/markdown/",
-    summary="Get the markdown file list of a knowledge base",
+    "/doc/{doc_id}/markdown/",
+    summary="Get the markdown file list of a document",
 )
 async def get_markdown_files(
     session: SessionDep,
-    kgb_id: int,
+    doc_id: int,
 ):
-    doc_list = session.exec(
-        select(DocFile).options(
-            load_only(
-                DocFile.id,
-                DocFile.filename,
-                DocFile.suffix,
-                DocFile.created_at,
-            ),
-        ).where(DocFile.kgb_id == kgb_id)).all()
     md_list = session.exec(
         select(MarkdownFile).options(
             load_only(
@@ -284,8 +278,7 @@ async def get_markdown_files(
                 MarkdownFile.summary,
                 MarkdownFile.created_at,
             ),
-        )
-        .where(MarkdownFile.doc_id.in_([doc.id for doc in doc_list]))).all()
+        ).order_by(MarkdownFile.id).where(MarkdownFile.doc_id == doc_id)).all()
 
     return {"md_list": md_list}
 
@@ -359,18 +352,10 @@ async def export_knowledge_base(
     if not kgb:
         raise HTTPException(HTTPStatus.NOT_FOUND, "Knowledge base not found")
 
-    doc_list = session.exec(
-        select(DocFile).options(
-            load_only(
-                DocFile.id,
-                DocFile.filename,
-                DocFile.suffix,
-                DocFile.created_at,
-            ),
-        ).where(DocFile.kgb_id == kgb_id)).all()
+    doc_ids = session.exec(
+        select(DocFile.id).where(DocFile.kgb_id == kgb_id)).all()
     md_list = session.exec(
-        select(MarkdownFile).where(
-            MarkdownFile.doc_id.in_([doc.id for doc in doc_list]))).all()
+        select(MarkdownFile).where(MarkdownFile.doc_id.in_(doc_ids))).all()
 
     with TemporaryDirectory() as tmpdir:
         data_dir = os.path.join(tmpdir, "data")
@@ -379,6 +364,9 @@ async def export_knowledge_base(
 
         with open(os.path.join(data_dir, "summary.txt"), "w") as f_summary:
             for md_file in md_list:
+                if not md_file.summary:
+                    continue
+
                 with open(os.path.join(md_dir, f"{md_file.id}.md"), "w") as f:
                     f.write(md_file.content)
 
