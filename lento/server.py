@@ -140,7 +140,7 @@ async def delete_kgb(
         raise HTTPException(HTTPStatus.NOT_FOUND, "Knowledge base not found")
     session.delete(kgb)
     session.commit()
-    return {}
+    return {"kgb_id": kgb_id}
 
 
 @router.get(
@@ -216,14 +216,17 @@ async def doc_to_markdown(
             logger.error(f"Error converting to markdown: {e}")
             raise HTTPException(HTTPStatus.INTERNAL_SERVER_ERROR, str(e))
 
+    md_list = []
     for block in split_by_lines(md_content, max_lines):
         md_file = MarkdownFile(
             doc_id=doc_id,
             content=block,
         )
         session.add(md_file)
-    session.commit()
-    return {}
+        session.commit()
+        session.refresh(md_file)
+        md_list.append(md_file)
+    return {"md_list": md_list}
 
 
 def split_by_lines(input: str, max_lines: int | None) -> List[str]:
@@ -259,7 +262,7 @@ async def delete_doc(
         raise HTTPException(HTTPStatus.NOT_FOUND, "Document not found")
     session.delete(doc_file)
     session.commit()
-    return {}
+    return {"doc_id": doc_id}
 
 
 @router.get(
@@ -315,8 +318,7 @@ async def generate_summary(
     session.add(md_file)
     session.commit()
     session.refresh(md_file)
-
-    return {}
+    return {"md_file": md_file}
 
 
 def generate_markdown_summary(content: str) -> str:
@@ -337,7 +339,7 @@ async def delete_markdown(
         raise HTTPException(HTTPStatus.NOT_FOUND, "Markdown file not found")
     session.delete(md_file)
     session.commit()
-    return {}
+    return {"md_id": md_id}
 
 
 @router.get(
@@ -362,7 +364,8 @@ async def export_knowledge_base(
         md_dir = os.path.join(data_dir, "markdown")
         os.makedirs(md_dir)
 
-        with open(os.path.join(data_dir, "summary.txt"), "w") as f_summary:
+        with open(os.path.join(data_dir, "summary.txt"), "w") as f_summary, \
+                open(os.path.join(md_dir, "files.txt"), "w") as f_files:
             for md_file in md_list:
                 if not md_file.summary:
                     continue
@@ -372,6 +375,9 @@ async def export_knowledge_base(
 
                 summary = md_file.summary.replace("\n", " ")
                 f_summary.write(f"{md_file.id}:{summary}\n\n")
+
+                doc_file = session.get(DocFile, md_file.doc_id)
+                f_files.write(f"{md_file.id}:{doc_file.filename}\n")
 
         zip_file = os.path.join(tmpdir, f"{kgb.id}.zip")
         shutil.make_archive(zip_file, "zip", data_dir)
