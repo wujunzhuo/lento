@@ -172,3 +172,4 @@ cython_debug/
 
 /lento.yaml
 database.db
+rag_app
